@@ -1,13 +1,11 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Numerics;
 using SAModelLibrary.Exceptions;
 using SAModelLibrary.IO;
 using SAModelLibrary.Maths;
-using SAModelLibrary.Utils;
 
 namespace SAModelLibrary
 {
@@ -20,6 +18,14 @@ namespace SAModelLibrary
         private Node mParent;
         private Node mChild;
         private Node mSibling;
+        private Vector3 mPosition;
+        private AngleVector mRotation;
+        private Vector3 mScale;
+        private Matrix4x4 mLocalTransform;
+        private Matrix4x4 mWorldTransform;
+        private bool mLocalTransformDirty;
+        private bool mWorldTransformDirty;
+        private bool mPRSDirty;
 
         /// <inheritdoc />
         public string SourceFilePath { get; set; }
@@ -43,17 +49,68 @@ namespace SAModelLibrary
         /// <summary>
         /// Gets the translation of the node.
         /// </summary>
-        public Vector3 Translation { get; set; }
+        public Vector3 Translation
+        {
+            get
+            {
+                if ( mPRSDirty )
+                    UpdatePRS();
+
+                return mPosition;
+            }
+            set
+            {
+                if ( mPosition != value )
+                {
+                    mPosition            = value;
+                    mLocalTransformDirty = true;
+                }
+            }
+        }
 
         /// <summary>
         /// Gets the rotation of the node, in angles.
         /// </summary>
-        public AngleVector Rotation { get; set; }
+        public AngleVector Rotation
+        {
+            get
+            {
+                if ( mPRSDirty )
+                    UpdatePRS();
+
+                return mRotation;
+            }
+            set
+            {
+                if ( mRotation != value )
+                {
+                    mRotation = value;
+                    mLocalTransformDirty = true;
+                }
+            }
+        }
 
         /// <summary>
         /// Gets the scale of the node.
         /// </summary>
-        public Vector3 Scale { get; set; }
+        public Vector3 Scale
+        {
+            get
+            {
+                if ( mPRSDirty )
+                    UpdatePRS();
+
+                return mScale;
+            }
+            set
+            {
+                if ( mScale != value )
+                {
+                    mScale               = value;
+                    mLocalTransformDirty = true;
+                }
+            }
+        }
 
         /// <summary>
         /// Gets the first child of this node.
@@ -121,10 +178,14 @@ namespace SAModelLibrary
             get => mParent;
             set
             {
-                mParent = value;
+                if ( mParent != value )
+                {
+                    mParent              = value;
+                    mWorldTransformDirty = true;
 
-                if ( Sibling != null )
-                    Sibling.Parent = mParent;
+                    if ( Sibling != null )
+                        Sibling.Parent = mParent;
+                }
             }
         }
 
@@ -135,21 +196,10 @@ namespace SAModelLibrary
         {
             get
             {
-                var transform = Matrix4x4.Identity;
+                if ( mLocalTransformDirty )
+                    UpdateLocalTransform();
 
-                if ( !Flags.HasFlag( NodeFlags.IgnoreScale ) )
-                    transform *= Matrix4x4.CreateScale( Scale );
-
-                if ( !Flags.HasFlag( NodeFlags.IgnoreTranslation ) )
-                    transform.Translation = Translation;
-
-
-                if ( !Flags.HasFlag( NodeFlags.UseZXYRotation ) )
-                    transform *= Rotation.ToRotationMatrix();
-                else
-                    transform *= Rotation.ToRotationMatrixZXY();
-
-                return transform;
+                return mLocalTransform;
             }
         }
 
@@ -160,16 +210,20 @@ namespace SAModelLibrary
         {
             get
             {
-                var transform = Transform;
-                if ( Parent != null )
-                    transform *= Parent.WorldTransform;
+                if ( mWorldTransformDirty )
+                    UpdateWorldTransform();
 
-                return transform;
+                return mWorldTransform;
             }
         }
 
         public Node()
-        {      
+        {
+            mPosition = Vector3.Zero;
+            mRotation = AngleVector.Zero;
+            mScale = Vector3.One;
+            mLocalTransform = Matrix4x4.Identity;
+            mWorldTransform = Matrix4x4.Identity;
         }
 
         public Node( Vector3 translation, AngleVector rotation, Vector3 scale, Node parent )
@@ -196,6 +250,43 @@ namespace SAModelLibrary
                 SourceEndianness = DetectEndianness( reader );
                 Read( reader, new NodeReadContext( format ) );
             }
+        }
+
+        private void UpdateLocalTransform()
+        {
+            mLocalTransform = Matrix4x4.Identity;
+
+            if ( !Flags.HasFlag( NodeFlags.IgnoreScale ) )
+                mLocalTransform *= Matrix4x4.CreateScale( Scale );
+
+            if ( !Flags.HasFlag( NodeFlags.IgnoreTranslation ) )
+                mLocalTransform.Translation = Translation;
+
+
+            if ( !Flags.HasFlag( NodeFlags.UseZXYRotation ) )
+                mLocalTransform *= Rotation.ToRotationMatrix();
+            else
+                mLocalTransform *= Rotation.ToRotationMatrixZXY();
+
+            mLocalTransformDirty = false;
+        }
+
+        private void UpdateWorldTransform()
+        {
+            mWorldTransform = Transform;
+            if ( Parent != null && Parent != this && Parent.Parent != this )
+                mWorldTransform *= Parent.WorldTransform;
+
+            mWorldTransformDirty = false;
+        }
+
+        private void UpdatePRS()
+        {
+            Matrix4x4.Decompose( mLocalTransform, out var scale, out var rotation, out var translation );
+            mPosition = translation;
+            mRotation = AngleVector.FromQuaternion( rotation );
+            mScale    = scale;
+            mPRSDirty = false;
         }
 
         public void Save( string filepath ) => Save( filepath, SourceEndianness );
@@ -242,7 +333,6 @@ namespace SAModelLibrary
 
             try
             {
-                NodeFlags expectedFlags = 0;
                 var flags          = (NodeFlags)reader.ReadInt32();
                 var geometryOffset = reader.ReadInt32();
                 var translation = reader.ReadVector3();
@@ -255,15 +345,14 @@ namespace SAModelLibrary
 
                 if ( flags == 0 && geometryOffset == 0 && translation == Vector3.Zero && angleX == 0 && angleY == 0 && angleZ == 0 &&
                      scale == Vector3.Zero && childOffset == 0 && siblingOffset == 0 )
+                {
+                    // All zero
                     return false;
+                }
 
                 // Check if any unspecified flags are used
                 if ( ( ( int )flags & ~0x3FF ) != 0 )
                     return false;
-
-                //var bannedFlags = NodeFlags.Modifier | NodeFlags.UseZXYRotation;
-                //if ( flags.HasFlag( bannedFlags ) )
-                //    return false;
 
                 bool IsValidFloat( float value )
                 {
@@ -274,29 +363,13 @@ namespace SAModelLibrary
                 }
                 bool IsValidVector3( Vector3 value ) => IsValidFloat( value.X ) && IsValidFloat( value.Y ) && IsValidFloat( value.Z );
 
-                //// Check for expected flags
-                //if ( translation == Vector3.Zero )
-                //    expectedFlags |= NodeFlags.IgnoreTranslation;
+                if ( !IsValidVector3( translation ) )
+                    return false;
 
-                //if ( angleX == 0 && angleY == 0 && angleZ == 0 )
-                //    expectedFlags |= NodeFlags.IgnoreRotation;
+                if ( !IsValidVector3( scale ) )
+                    return false;
 
-                //if ( scale == Vector3.One )
-                //    expectedFlags |= NodeFlags.IgnoreScale;
-
-                //if ( childOffset == 0 )
-                //    expectedFlags |= NodeFlags.IgnoreChildren;
-
-                //if ( !flags.HasFlag( expectedFlags ) )
-                //    return false;
-
-                //if ( !IsValidVector3( translation ) )
-                //    return false;
-
-                //if ( !IsValidVector3( scale ) )
-                //    return false;
-
-                if ( scale.X == 0 || scale.Y == 0 || scale.Z == 0 )
+                if ( scale == Vector3.Zero )
                     return false;
 
                 if ( geometryOffset != 0 )
@@ -322,9 +395,9 @@ namespace SAModelLibrary
                     if ( !reader.IsValidOffset( childOffset ) )
                         return false;
 
-                    reader.ReadAtOffset( childOffset, () => isValid = Validate( reader ) );
-                    if ( !isValid )
-                        return false;
+                    //reader.ReadAtOffset( childOffset, () => isValid = Validate( reader ) );
+                    //if ( !isValid )
+                    //    return false;
                 }
 
                 if ( siblingOffset != 0 )
@@ -332,9 +405,9 @@ namespace SAModelLibrary
                     if ( !reader.IsValidOffset( siblingOffset ) )
                         return false;
 
-                    reader.ReadAtOffset( siblingOffset, () => isValid = Validate( reader ) );
-                    if ( !isValid )
-                        return false;
+                    //reader.ReadAtOffset( siblingOffset, () => isValid = Validate( reader ) );
+                    //if ( !isValid )
+                    //    return false;
                 }
 
                 return true;
@@ -347,6 +420,12 @@ namespace SAModelLibrary
 
         private void Read( EndianBinaryReader reader, NodeReadContext context )
         {
+            context.NodeCount++;
+
+            // Fix for scanner
+            if ( context.NodeCount > 1000 )
+                throw new InvalidFileFormatException( "Too many nodes" );
+
             Parent = context.Parent;
             Flags = ( NodeFlags )reader.ReadInt32();
             Geometry = ReadGeometry( reader, context.GeometryFormat, reader.ReadInt32() );
@@ -359,23 +438,28 @@ namespace SAModelLibrary
             Rotation = new AngleVector( angleX, angleY, angleZ );
 
             Scale = reader.ReadVector3();
-            mChild = reader.ReadObjectOffset<Node>( new NodeReadContext( this, Geometry?.Format ?? context.GeometryFormat ) );
+            mChild = reader.ReadObjectOffset<Node>( new NodeReadContext( this, Geometry?.Format ?? context.GeometryFormat ) { NodeCount = context.NodeCount } );
             mSibling = reader.ReadObjectOffset<Node>( context );
 
-            // Fix for node scanner
-            if ( mChild != null && mChild.Parent == null )
-                mChild.Parent = this;
-
-            if ( mSibling != null )
+            // Fixes for node scanner
             {
-                if ( Parent == null && mSibling.Parent != null )
+                if ( mChild != null && mChild.Parent == null )
+                    mChild.Parent = this;
+
+                if ( mSibling != null )
                 {
-                    Parent = mSibling.Parent;
+                    if ( Parent == null && mSibling.Parent != null )
+                    {
+                        Parent = mSibling.Parent;
+                    }
+                    else if ( Parent != null && mSibling.Parent == null )
+                    {
+                        mSibling.Parent = Parent;
+                    }
                 }
-                else if ( Parent != null && mSibling.Parent == null )
-                {
-                    mSibling.Parent = Parent;
-                }
+
+                if ( Parent != null && ( Parent == this || Parent.Parent == this ) )
+                    throw new InvalidFileFormatException( "Circular dependency in parent hierarchy" );
             }
         }
 
@@ -383,6 +467,9 @@ namespace SAModelLibrary
         {
             if ( offset == 0 )
                 return null;
+
+            if ( !reader.IsValidOffset( offset ) )
+                throw new InvalidGeometryDataException( "Invalid geometry offset" );
 
             switch ( format )
             {
@@ -476,11 +563,12 @@ namespace SAModelLibrary
             {
                 while ( node != null )
                 {
-                    yield return node;
+                    if ( node == this && includeSelf )
+                        yield return node;
 
                     if ( node.Child != null )
                     {
-                        foreach ( var childNode in EnumerateAllNodes( node.Child ) )
+                        foreach ( var childNode in node.Child.EnumerateAllNodes( true ) )
                             yield return childNode;
                     }
 
@@ -513,6 +601,8 @@ namespace SAModelLibrary
         public Node Parent { get; set; }
 
         public GeometryFormat GeometryFormat { get; set; }
+
+        internal int NodeCount { get; set; }
 
         public NodeReadContext( GeometryFormat format )
         {

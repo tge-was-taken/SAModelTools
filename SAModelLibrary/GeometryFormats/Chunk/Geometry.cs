@@ -54,6 +54,8 @@ namespace SAModelLibrary.GeometryFormats.Chunk
         public static bool Validate( EndianBinaryReader reader )
         {
             var start = reader.Position;
+            if ( start + 8 > reader.BaseStream.Length )
+                return false;
 
             try
             {

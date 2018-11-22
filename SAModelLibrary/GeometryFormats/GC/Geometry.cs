@@ -61,6 +61,8 @@ namespace SAModelLibrary.GeometryFormats.GC
         public static bool Validate( EndianBinaryReader reader )
         {
             var startPosition = reader.Position;
+            if ( startPosition + 20 > reader.BaseStream.Length )
+                return false;
 
             try
             {

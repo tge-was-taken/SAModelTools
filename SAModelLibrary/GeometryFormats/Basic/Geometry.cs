@@ -93,6 +93,8 @@ namespace SAModelLibrary.GeometryFormats.Basic
         public static bool Validate(EndianBinaryReader reader )
         {
             var start = reader.Position;
+            if ( start + 28 > reader.BaseStream.Length )
+                return false;
 
             try
             {
